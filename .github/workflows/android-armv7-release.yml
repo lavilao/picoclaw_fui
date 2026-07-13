@@ -108,23 +108,7 @@ jobs:
           mkdir -p /tmp/browser
           cp target/armv7-linux-androideabi/release/zeroclaw /tmp/browser/zeroclaw-armv7-android
 
-      - name: Build picoclaw (Go - gateway binary)
-        run: |
-          git clone https://github.com/sipeed/picoclaw /tmp/picoclaw
-          cd /tmp/picoclaw
-
-          NDK=/opt/android-ndk-r29
-          TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64
-          export PATH=$TOOLCHAIN/bin:$PATH
-          export CC=armv7a-linux-androideabi24-clang
-          export CXX=armv7a-linux-androideabi24-clang++
-          export TMPDIR=/tmp
-
-          CGO_ENABLED=1 CC=$CC GOOS=android GOARCH=arm GOARM=7 \
-            go build -tags stdjson,whatsapp_native -ldflags "-s -w" \
-              -o /tmp/browser/picoclaw-armv7-android ./cmd/picoclaw
-
-      - name: Build picoclaw (Go - web launcher binary)
+       - name: Build picoclaw (Go - web launcher binary)
         run: |
           cd /tmp/picoclaw/web
 
@@ -135,34 +119,39 @@ jobs:
           cd ..
 
           # Patch: add systray stub for android+cgo
-          cat > backend/systray_android.go << 'GOEOF'
+          cat > backend/systray_android.go <<'GOEOF'
           //go:build android
 
           package main
 
           import (
-		"context"
-		"os"
-		"os/signal"
-		"syscall"
-		"time"
-		"github.com/sipeed/picoclaw/pkg/logger"
+            "context"
+            "os"
+            "os/signal"
+            "syscall"
+            "time"
+
+            "github.com/sipeed/picoclaw/pkg/logger"
           )
 
           func runTray() {
-		logger.Infof("System tray is unavailable on Android; running headless")
-		if !*noBrowser {
-			go func() {
-				time.Sleep(browserDelay)
-				if err := openBrowser(); err != nil {
-					logger.Errorf("Warning: Failed to auto-open browser: %v", err)
-				}
-			}()
-		}
-		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-		defer stop()
-		<-ctx.Done()
-		shutdownApp()
+            logger.Infof("System tray is unavailable on Android; running headless")
+
+            if !*noBrowser {
+              go func() {
+                time.Sleep(browserDelay)
+                if err := openBrowser(); err != nil {
+                  logger.Errorf("Warning: Failed to auto-open browser: %v", err)
+                }
+              }()
+            }
+
+            ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+            defer stop()
+
+            <-ctx.Done()
+
+            shutdownApp()
           }
           GOEOF
 
