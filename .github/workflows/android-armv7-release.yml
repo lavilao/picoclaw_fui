@@ -77,7 +77,11 @@ jobs:
       - name: Build picoclaw-web frontend assets
         working-directory: /tmp/picoclaw/web/frontend
         run: |
-          pnpm install --frozen-lockfile
+          # FIX: The upstream pnpm-lock.yaml has a YAML syntax error 
+          # (duplicated mapping key). Delete it so pnpm can generate a fresh one.
+          rm -f pnpm-lock.yaml
+          
+          pnpm install
           pnpm build:backend
 
       - name: Build picoclaw-web launcher (Go → android/armv7)
