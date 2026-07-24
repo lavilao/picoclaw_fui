@@ -17,7 +17,7 @@ jobs:
       - name: Checkout picoclaw_fui
         uses: actions/checkout@v4
 
-      # ── Toolchains ──────────────────────────────
+      # ── Toolchains ──────────────────────────────────
       - name: Set up JDK 21
         uses: actions/setup-java@v4
         with:
@@ -44,31 +44,47 @@ jobs:
         with:
           channel: 'stable'
 
-      # ── NDK (pre-installed on runner) ───────────
+      # ── NDK (pre-installed on the runner) ───────────
       - name: Configure NDK paths
         run: |
           NDK="$ANDROID_NDK_LATEST_HOME"
-          echo "NDK at: $NDK"
-          echo "NDK_HOME=$NDK" >> $GITHUB_ENV
-          echo "NDK_TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64" >> $GITHUB_ENV
-          echo "ANDROID_NDK_HOME=$NDK" >> $GITHUB_ENV
+          TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64"
+          echo "NDK_HOME=$NDK"            >> $GITHUB_ENV
+          echo "NDK_TOOLCHAIN=$TOOLCHAIN"  >> $GITHUB_ENV
+          echo "ANDROID_NDK_HOME=$NDK"     >> $GITHUB_ENV
+          echo "CC=$TOOLCHAIN/bin/armv7a-linux-androideabi24-clang" >> $GITHUB_ENV
+          echo "CXX=$TOOLCHAIN/bin/armv7a-linux-androideabi24-clang++" >> $GITHUB_ENV
+          echo "NDK: $NDK"
 
-      # ── Clone picoclaw (Go) ─────────────────────
+      # ── Clone picoclaw (Go) ─────────────────────────
       - name: Clone picoclaw
         run: git clone --depth 1 https://github.com/sipeed/picoclaw /tmp/picoclaw
 
-      # ── Build frontend assets ───────────────────
-      - name: Build picoclaw frontend
+      # ── 1) Gateway binary  (./cmd/picoclaw) ─────────
+      - name: Build picoclaw gateway (Go → android/armv7)
+        working-directory: /tmp/picoclaw
+        run: |
+          CGO_ENABLED=1 GOOS=android GOARCH=arm GOARM=7 \
+            go build \
+              -tags stdjson,whatsapp_native \
+              -ldflags "-s -w" \
+              -o /tmp/picoclaw-armv7-android \
+              ./cmd/picoclaw
+
+          ls -lh /tmp/picoclaw-armv7-android
+
+      # ── 2) Web launcher binary  (./web/backend/) ────
+      - name: Build picoclaw-web frontend assets
         working-directory: /tmp/picoclaw/web/frontend
         run: |
           pnpm install --frozen-lockfile
           pnpm build:backend
 
-      # ── Build picoclaw-web (Go → android/armv7) ─
-      - name: Build picoclaw-web
+      - name: Build picoclaw-web launcher (Go → android/armv7)
         working-directory: /tmp/picoclaw/web
         run: |
-          # systray stub — Android has no system tray
+          # systray stub — android/arm forces CGO_ENABLED=1,
+          # but upstream only has a !cgo stub
           cat > backend/systray_android.go <<'GOEOF'
           //go:build android
 
@@ -86,7 +102,6 @@ jobs:
 
           func runTray() {
           	logger.Infof("System tray is unavailable on Android; running headless")
-
           	if !*noBrowser {
           		go func() {
           			time.Sleep(browserDelay)
@@ -95,7 +110,6 @@ jobs:
           			}
           		}()
           	}
-
           	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
           	defer stop()
           	<-ctx.Done()
@@ -103,32 +117,28 @@ jobs:
           }
           GOEOF
 
-          CC="$NDK_TOOLCHAIN/bin/armv7a-linux-androideabi24-clang"
-          CXX="$NDK_TOOLCHAIN/bin/armv7a-linux-androideabi24-clang++"
-
-          CGO_ENABLED=1 \
-          GOOS=android \
-          GOARCH=arm \
-          GOARM=7 \
-          CC="$CC" \
-          CXX="$CXX" \
+          CGO_ENABLED=1 GOOS=android GOARCH=arm GOARM=7 \
             go build \
               -tags stdjson \
               -ldflags "-s -w" \
-              -o /tmp/picoclaw-web-armv7.so \
+              -o /tmp/picoclaw-web-armv7-android \
               ./backend/
 
-          ls -lh /tmp/picoclaw-web-armv7.so
+          ls -lh /tmp/picoclaw-web-armv7-android
 
-      # ── Place native lib into Flutter project ───
-      - name: Install JNI library
+      # ── 3) Place both binaries into jniLibs ─────────
+      - name: Install JNI libraries
         run: |
           DEST=android/app/src/main/jniLibs/armeabi-v7a
           mkdir -p "$DEST"
-          cp /tmp/picoclaw-web-armv7.so "$DEST/libpicoclaw-web.so"
+
+          cp /tmp/picoclaw-armv7-android     "$DEST/libpicoclaw.so"
+          cp /tmp/picoclaw-web-armv7-android "$DEST/libpicoclaw-web.so"
+
+          echo "--- jniLibs/armeabi-v7a ---"
           ls -lh "$DEST/"
 
-      # ── Build Flutter APK ───────────────────────
+      # ── 4) Build Flutter APK ────────────────────────
       - name: Write local.properties
         run: |
           cat > android/local.properties <<EOF
