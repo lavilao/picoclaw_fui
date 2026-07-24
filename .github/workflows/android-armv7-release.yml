@@ -29,12 +29,6 @@ jobs:
         with:
           go-version: 'stable'
 
-      - name: Set up Rust + armv7 target
-        run: |
-          rustup update stable
-          rustup default stable
-          rustup target add armv7-linux-androideabi
-
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
@@ -59,35 +53,19 @@ jobs:
           echo "NDK_TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64" >> $GITHUB_ENV
           echo "ANDROID_NDK_HOME=$NDK" >> $GITHUB_ENV
 
-      # ── 1) zeroclaw (Rust) ─────────────────────
-      - name: Install cargo-ndk
-        run: cargo install cargo-ndk
-
-      - name: Clone zeroclaw
-        run: git clone --depth 1 https://github.com/rerod/zeroclaw /tmp/zeroclaw
-
-      - name: Build zeroclaw (Rust → armv7)
-        working-directory: /tmp/zeroclaw
-        run: |
-          cargo ndk \
-            --target armeabi-v7a \
-            --platform 24 \
-            --output-dir /tmp/native-out \
-            build --release
-          echo "--- zeroclaw output ---"
-          ls -lh /tmp/native-out/
-
-      # ── 2) picoclaw (Go) ───────────────────────
+      # ── Clone picoclaw (Go) ─────────────────────
       - name: Clone picoclaw
         run: git clone --depth 1 https://github.com/sipeed/picoclaw /tmp/picoclaw
 
-      - name: Build picoclaw frontend assets
+      # ── Build frontend assets ───────────────────
+      - name: Build picoclaw frontend
         working-directory: /tmp/picoclaw/web/frontend
         run: |
           pnpm install --frozen-lockfile
           pnpm build:backend
 
-      - name: Build picoclaw-web (Go → android/armv7)
+      # ── Build picoclaw-web (Go → android/armv7) ─
+      - name: Build picoclaw-web
         working-directory: /tmp/picoclaw/web
         run: |
           # systray stub — Android has no system tray
@@ -137,28 +115,20 @@ jobs:
             go build \
               -tags stdjson \
               -ldflags "-s -w" \
-              -o /tmp/native-out/libpicoclaw-web.so \
+              -o /tmp/picoclaw-web-armv7.so \
               ./backend/
 
-          echo "--- picoclaw-web output ---"
-          ls -lh /tmp/native-out/libpicoclaw-web.so
+          ls -lh /tmp/picoclaw-web-armv7.so
 
-      # ── 3) Assemble JNI libs into Flutter project ──
-      - name: Install JNI libraries
+      # ── Place native lib into Flutter project ───
+      - name: Install JNI library
         run: |
           DEST=android/app/src/main/jniLibs/armeabi-v7a
           mkdir -p "$DEST"
-
-          # zeroclaw (Rust)  → libzeroclaw.so
-          cp /tmp/native-out/libzeroclaw.so "$DEST/libzeroclaw.so"
-
-          # picoclaw (Go)    → libpicoclaw-web.so
-          cp /tmp/native-out/libpicoclaw-web.so "$DEST/libpicoclaw-web.so"
-
-          echo "--- jniLibs/armeabi-v7a ---"
+          cp /tmp/picoclaw-web-armv7.so "$DEST/libpicoclaw-web.so"
           ls -lh "$DEST/"
 
-      # ── 4) Build Flutter APK ───────────────────
+      # ── Build Flutter APK ───────────────────────
       - name: Write local.properties
         run: |
           cat > android/local.properties <<EOF
