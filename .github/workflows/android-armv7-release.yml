@@ -8,6 +8,7 @@ permissions:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+  ANDROID_NDK_HOME: /opt/android-ndk-r29
 
 jobs:
   build-armv7:
@@ -51,13 +52,11 @@ jobs:
       - name: Install Android SDK Command-line Tools & Build Tools
         run: |
           mkdir -p $HOME/android-sdk
-          wget -q -O cmdline-tools.zip "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip"
-          unzip -q cmdline-tools.zip
-          mv cmdline-tools $HOME/android-sdk/cmdline-tools-temp
+          wget -q -O /tmp/cmdline-tools.zip "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip"
+          unzip -q /tmp/cmdline-tools.zip -d /tmp/cmdline-tools-extract
           mkdir -p $HOME/android-sdk/cmdline-tools/latest
-          # Move everything under cmdline-tools-temp to latest/
-          mv $HOME/android-sdk/cmdline-tools-temp/* $HOME/android-sdk/cmdline-tools/latest/ 2>/dev/null || true
-          rm -rf $HOME/android-sdk/cmdline-tools-temp
+          mv /tmp/cmdline-tools-extract/cmdline-tools/* $HOME/android-sdk/cmdline-tools/latest/
+          rm -rf /tmp/cmdline-tools.zip /tmp/cmdline-tools-extract
 
           echo "ANDROID_HOME=$HOME/android-sdk" >> $GITHUB_ENV
           echo "$HOME/android-sdk/cmdline-tools/latest/bin" >> $GITHUB_PATH
@@ -65,59 +64,83 @@ jobs:
 
           export PATH="$HOME/android-sdk/cmdline-tools/latest/bin:$PATH"
           yes | sdkmanager --sdk_root=$HOME/android-sdk --licenses || true
-          sdkmanager --sdk_root=$HOME/android-sdk "platforms;android-36" "build-tools;35.0.0"
+          sdkmanager --sdk_root=$HOME/android-sdk "platform-tools" "platforms;android-36" "build-tools;35.0.0"
 
       - name: Install and Set Up Android NDK r29
         run: |
-          sudo mkdir -p /opt
           wget -q -O /tmp/android-ndk.zip "https://dl.google.com/android/repository/android-ndk-r29-linux.zip"
           sudo unzip -q /tmp/android-ndk.zip -d /opt
-          # Find the extracted folder and rename to standard /opt/android-ndk-r29/
+          # Rename to a predictable path
           NDK_DIR=$(find /opt -maxdepth 1 -type d -name "android-ndk-r2*")
-          sudo mv "$NDK_DIR" /opt/android-ndk-r29
+          if [ "$NDK_DIR" != "/opt/android-ndk-r29" ]; then
+            sudo mv "$NDK_DIR" /opt/android-ndk-r29
+          fi
+          rm -f /tmp/android-ndk.zip
 
-          # Symlink libclang_rt.builtins-arm-android.a -> libgcc.a inside clang resource directory
+          # Symlink libclang_rt.builtins-arm-android.a -> libgcc.a (needed by Rust linker)
           BUILTIN_A=$(find /opt/android-ndk-r29 -name "libclang_rt.builtins-arm-android.a" | head -n 1)
           if [ -n "$BUILTIN_A" ]; then
             BUILTIN_DIR=$(dirname "$BUILTIN_A")
             sudo ln -sf "$BUILTIN_A" "$BUILTIN_DIR/libgcc.a"
-            echo "Successfully symlinked $BUILTIN_A to $BUILTIN_DIR/libgcc.a"
+            echo "Symlinked: $BUILTIN_A -> $BUILTIN_DIR/libgcc.a"
           else
             echo "Error: libclang_rt.builtins-arm-android.a not found!"
             exit 1
           fi
 
-      - name: Build zeroclaw (Rust)
+          echo "ANDROID_NDK_HOME=/opt/android-ndk-r29" >> $GITHUB_ENV
+
+      - name: Write local.properties (SDK + NDK paths for Gradle)
         run: |
-          git clone https://github.com/rerod/zeroclaw /tmp/zeroclaw
+          cat > android/local.properties <<EOF
+          sdk.dir=$HOME/android-sdk
+          ndk.dir=/opt/android-ndk-r29
+          EOF
+
+      # ──────────────────────────────────────────────
+      # Build zeroclaw (Rust native core)
+      # ──────────────────────────────────────────────
+      - name: Build zeroclaw (Rust → armv7-linux-androideabi)
+        run: |
+          git clone --depth 1 https://github.com/rerod/zeroclaw /tmp/zeroclaw
           cd /tmp/zeroclaw
 
           NDK=/opt/android-ndk-r29
           TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64
-          export PATH=$TOOLCHAIN/bin:$PATH
+          export PATH="$TOOLCHAIN/bin:$PATH"
+          export CC_armv7_linux_androideabi=armv7a-linux-androideabi24-clang
+          export CXX_armv7_linux_androideabi=armv7a-linux-androideabi24-clang++
           export CC=armv7a-linux-androideabi24-clang
           export CXX=armv7a-linux-androideabi24-clang++
           export TMPDIR=/tmp
 
-          CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER=$CC \
-            cargo build --release --target armv7-linux-androideabi \
-              --config 'target.armv7-linux-androideabi.linker="/opt/android-ndk-r29/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi24-clang"' \
-              --config 'profile.release.lto="thin"' \
-              --config 'profile.release.codegen-units=16'
+          cargo build --release --target armv7-linux-androideabi \
+            --config 'target.armv7-linux-androideabi.linker="/opt/android-ndk-r29/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi24-clang"' \
+            --config 'profile.release.lto="thin"' \
+            --config 'profile.release.codegen-units=16'
 
+          # cdylib output is libzeroclaw.so; copy with the name the app expects
           mkdir -p /tmp/browser
-          cp target/armv7-linux-androideabi/release/zeroclaw /tmp/browser/zeroclaw-armv7-android
+          cp target/armv7-linux-androideabi/release/libzeroclaw.so /tmp/browser/libpicoclaw.so
+          echo "zeroclaw built successfully"
+          ls -lh /tmp/browser/libpicoclaw.so
 
-       - name: Build picoclaw (Go - web launcher binary)
+      # ──────────────────────────────────────────────
+      # Build picoclaw-web (Go launcher binary)
+      # ──────────────────────────────────────────────
+      - name: Clone picoclaw repository
         run: |
-          cd /tmp/picoclaw/web
+          git clone --depth 1 https://github.com/sipeed/picoclaw /tmp/picoclaw
 
-          # Build frontend assets
-          cd frontend
+      - name: Build picoclaw-web frontend assets
+        working-directory: /tmp/picoclaw/web/frontend
+        run: |
           pnpm install --frozen-lockfile
           pnpm build:backend
-          cd ..
 
+      - name: Build picoclaw-web (Go → android/armv7)
+        working-directory: /tmp/picoclaw/web
+        run: |
           # Patch: add systray stub for android+cgo
           cat > backend/systray_android.go <<'GOEOF'
           //go:build android
@@ -157,31 +180,37 @@ jobs:
 
           NDK=/opt/android-ndk-r29
           TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64
-          export PATH=$TOOLCHAIN/bin:$PATH
+          export PATH="$TOOLCHAIN/bin:$PATH"
           export CC=armv7a-linux-androideabi24-clang
           export CXX=armv7a-linux-androideabi24-clang++
           export TMPDIR=/tmp
 
-          CGO_ENABLED=1 CC=$CC GOOS=android GOARCH=arm GOARM=7 \
+          CGO_ENABLED=1 GOOS=android GOARCH=arm GOARM=7 \
             go build -tags stdjson -ldflags "-s -w" \
-              -o /tmp/browser/picoclaw-web-armv7-android ./backend/
+              -o /tmp/browser/libpicoclaw-web.so ./backend/
 
+          echo "picoclaw-web built successfully"
+          ls -lh /tmp/browser/libpicoclaw-web.so
+
+      # ──────────────────────────────────────────────
+      # Assemble & build Flutter APK
+      # ──────────────────────────────────────────────
       - name: Prepare Android JNI Directories & Assets
         run: |
           mkdir -p android/app/src/main/jniLibs/armeabi-v7a
-          cp /tmp/browser/picoclaw-armv7-android android/app/src/main/jniLibs/armeabi-v7a/libpicoclaw.so
-          cp /tmp/browser/picoclaw-web-armv7-android android/app/src/main/jniLibs/armeabi-v7a/libpicoclaw-web.so
+          cp /tmp/browser/libpicoclaw.so     android/app/src/main/jniLibs/armeabi-v7a/libpicoclaw.so
+          cp /tmp/browser/libpicoclaw-web.so android/app/src/main/jniLibs/armeabi-v7a/libpicoclaw-web.so
+          echo "JNI libs in place:"
+          ls -lh android/app/src/main/jniLibs/armeabi-v7a/
 
       - name: Flutter Pub Get
         run: flutter pub get
 
-      - name: Build Flutter APK (armeabi-v7a)
-        env:
-          ANDROID_HOME: ${{ env.ANDROID_HOME }}
+      - name: Build Flutter APK (armeabi-v7a only)
         run: |
-          export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$PATH"
           flutter build apk --release --target-platform android-arm
           cp build/app/outputs/flutter-apk/app-release.apk picoclaw_fui_armv7.apk
+          ls -lh picoclaw_fui_armv7.apk
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
