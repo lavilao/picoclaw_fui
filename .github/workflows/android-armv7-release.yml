@@ -44,17 +44,26 @@ jobs:
         with:
           channel: 'stable'
 
-      # ── NDK (pre-installed on the runner) ───────────
-      - name: Configure NDK paths
+      # ── NDK — install the version the project pins ──
+      - name: Install NDK 28.2.13676358
         run: |
-          NDK="$ANDROID_NDK_LATEST_HOME"
-          TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64"
-          echo "NDK_HOME=$NDK"            >> $GITHUB_ENV
-          echo "NDK_TOOLCHAIN=$TOOLCHAIN"  >> $GITHUB_ENV
-          echo "ANDROID_NDK_HOME=$NDK"     >> $GITHUB_ENV
-          echo "CC=$TOOLCHAIN/bin/armv7a-linux-androideabi24-clang" >> $GITHUB_ENV
-          echo "CXX=$TOOLCHAIN/bin/armv7a-linux-androideabi24-clang++" >> $GITHUB_ENV
-          echo "NDK: $NDK"
+          SDK="$ANDROID_HOME"
+          yes | "$SDK/cmdline-tools/latest/bin/sdkmanager" --licenses || true
+          "$SDK/cmdline-tools/latest/bin/sdkmanager" --install "ndk;28.2.13676358"
+
+          NDK="$SDK/ndk/28.2.13676358"
+          TC="$NDK/toolchains/llvm/prebuilt/linux-x86_64"
+
+          {
+            echo "NDK_HOME=$NDK"
+            echo "NDK_TOOLCHAIN=$TC"
+            echo "ANDROID_NDK_HOME=$NDK"
+            echo "CC=$TC/bin/armv7a-linux-androideabi24-clang"
+            echo "CXX=$TC/bin/armv7a-linux-androideabi24-clang++"
+          } >> $GITHUB_ENV
+
+          echo "NDK installed at: $NDK"
+          ls "$TC/bin/" | grep armv7a | head -3
 
       # ── Clone picoclaw (Go) ─────────────────────────
       - name: Clone picoclaw
@@ -70,40 +79,30 @@ jobs:
               -ldflags "-s -w" \
               -o /tmp/picoclaw-armv7-android \
               ./cmd/picoclaw
-
           ls -lh /tmp/picoclaw-armv7-android
 
       # ── 2) Web launcher binary  (./web/backend/) ────
       - name: Build picoclaw-web frontend assets
         working-directory: /tmp/picoclaw/web/frontend
         run: |
-          # FIX: The upstream pnpm-lock.yaml has a YAML syntax error 
-          # (duplicated mapping key). Delete it so pnpm can generate a fresh one.
           rm -f pnpm-lock.yaml
-          
           pnpm install
           pnpm build:backend
 
       - name: Build picoclaw-web launcher (Go → android/armv7)
         working-directory: /tmp/picoclaw/web
         run: |
-          # systray stub — android/arm forces CGO_ENABLED=1,
-          # but upstream only has a !cgo stub
           cat > backend/systray_android.go <<'GOEOF'
           //go:build android
-
           package main
-
           import (
           	"context"
           	"os"
           	"os/signal"
           	"syscall"
           	"time"
-
           	"github.com/sipeed/picoclaw/pkg/logger"
           )
-
           func runTray() {
           	logger.Infof("System tray is unavailable on Android; running headless")
           	if !*noBrowser {
@@ -127,7 +126,6 @@ jobs:
               -ldflags "-s -w" \
               -o /tmp/picoclaw-web-armv7-android \
               ./backend/
-
           ls -lh /tmp/picoclaw-web-armv7-android
 
       # ── 3) Place both binaries into jniLibs ─────────
@@ -135,11 +133,8 @@ jobs:
         run: |
           DEST=android/app/src/main/jniLibs/armeabi-v7a
           mkdir -p "$DEST"
-
           cp /tmp/picoclaw-armv7-android     "$DEST/libpicoclaw.so"
           cp /tmp/picoclaw-web-armv7-android "$DEST/libpicoclaw-web.so"
-
-          echo "--- jniLibs/armeabi-v7a ---"
           ls -lh "$DEST/"
 
       # ── 4) Build Flutter APK ────────────────────────
@@ -149,6 +144,7 @@ jobs:
           sdk.dir=$ANDROID_HOME
           ndk.dir=$NDK_HOME
           EOF
+          cat android/local.properties
 
       - name: Flutter pub get
         run: flutter pub get
